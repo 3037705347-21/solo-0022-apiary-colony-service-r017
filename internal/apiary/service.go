@@ -33,29 +33,14 @@ type InstallHiveInput struct {
 }
 
 func (s *Service) RegisterApiary(input RegisterApiaryInput) (domain.Apiary, error) {
-	key := domain.ApiaryRegistrationKey(input.ID)
-	if err := s.store.ReserveApiarySlot(key, input.ID); err != nil {
-		existing, ok := s.store.GetApiary(domain.TrimText(input.ID))
-		if !ok {
-			return domain.Apiary{}, err
-		}
-		refreshed, refreshErr := domain.NewApiary(
-			existing.ID,
-			input.Name,
-			input.District,
-			input.Keeper,
-			existing.CreatedAt,
-		)
-		if refreshErr != nil {
-			return domain.Apiary{}, refreshErr
-		}
-		return s.store.RefreshApiaryRegistration(key, refreshed)
-	}
+	// 先完成全部领域校验：一次未被接受的登记不能在仓储里留下任何痕迹。
 	apiary, err := domain.NewApiary(input.ID, input.Name, input.District, input.Keeper, s.clock())
 	if err != nil {
 		return domain.Apiary{}, err
 	}
-	return s.store.CommitApiaryRegistration(key, apiary)
+	// 唯一性判定与写入在仓储的同一把写锁内完成，重复或并发的同编号登记
+	// 最多只有一次成功，且已经确认的蜂场内容不会被后续提交改写。
+	return s.store.RegisterApiary(apiary)
 }
 
 func (s *Service) Apiary(id string) (domain.Apiary, error) {
@@ -67,10 +52,9 @@ func (s *Service) Apiary(id string) (domain.Apiary, error) {
 }
 
 func (s *Service) InstallHive(apiaryID string, input InstallHiveInput) (domain.Hive, error) {
+	// 只有已经确认的蜂场才能安装蜂箱；未被接受的登记读取不到，直接返回未找到。
 	if _, err := s.Apiary(apiaryID); err != nil {
-		if !s.store.ApiaryRegistered(apiaryID) {
-			return domain.Hive{}, err
-		}
+		return domain.Hive{}, err
 	}
 	model, err := ParseHiveModel(input.Model)
 	if err != nil {

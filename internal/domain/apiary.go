@@ -36,19 +36,8 @@ func NewApiary(id, name, district, keeper string, createdAt time.Time) (Apiary, 
 	}, nil
 }
 
-// ApiaryRegistrationKey 返回一次蜂场登记使用的唯一性键。
+// ApiaryRegistrationKey 返回一次蜂场登记使用的唯一性键，
+// 编号规范化为小写后再判重，避免大小写差异绕过唯一性。
 func ApiaryRegistrationKey(id string) string {
-	return strings.ToLower(id)
-}
-
-// SameApiaryIdentity 判断两个入口编号是否指向同一座蜂场。
-func SameApiaryIdentity(left, right string) bool {
-	return ApiaryRegistrationKey(left) == ApiaryRegistrationKey(right)
-}
-
-// RegistrationMatches 判断已有登记是否与本次提交描述同一份业务事实。
-func (a Apiary) RegistrationMatches(name, district, keeper string) bool {
-	return a.Name == TrimText(name) &&
-		a.District == TrimText(district) &&
-		a.Keeper == TrimText(keeper)
+	return strings.ToLower(strings.TrimSpace(id))
 }

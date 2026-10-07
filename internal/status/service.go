@@ -22,7 +22,7 @@ func New(memory *store.Memory, clock func() time.Time) *Service {
 
 func (s *Service) ApiaryStatus(apiaryID string, asOf *time.Time) (Report, error) {
 	snapshot := s.store.Snapshot()
-	apiary, ok := snapshot.Apiaries[apiaryID]
+	apiary, ok := snapshot.Apiaries[domain.ApiaryRegistrationKey(apiaryID)]
 	if !ok {
 		return Report{}, domain.NotFound("蜂场", apiaryID)
 	}
