@@ -18,16 +18,8 @@ type Memory struct {
 	inspections map[string][]domain.Inspection
 	queens      map[string][]domain.Queen
 
-	apiarySlots map[string]apiarySlot
-
 	inspectionSeq int
 	queenSeq      int
-}
-
-// apiarySlot 记录一次蜂场登记在唯一性键下的占位与确认状态。
-type apiarySlot struct {
-	apiaryID  string
-	confirmed bool
 }
 
 func NewMemory() *Memory {
@@ -36,31 +28,57 @@ func NewMemory() *Memory {
 		hives:       make(map[string]domain.Hive),
 		inspections: make(map[string][]domain.Inspection),
 		queens:      make(map[string][]domain.Queen),
-		apiarySlots: make(map[string]apiarySlot),
 	}
 }
 
-func (m *Memory) CreateApiary(apiary domain.Apiary) error {
+// RegisterApiary 在同一把写锁内完成编号唯一性判定与写入：
+// 同一编号（大小写不敏感）至多一次登记成功，重复与并发提交只有先到的一份被确认，
+// 其余得到冲突结果。调用方必须先完成全部领域校验，被拒绝的登记不会触达仓储。
+func (m *Memory) RegisterApiary(apiary domain.Apiary) (domain.Apiary, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.apiaries[apiary.ID]; ok {
-		return domain.Conflict("蜂场 %q 已存在", apiary.ID)
+	if _, ok := m.lookupApiaryLocked(apiary.ID); ok {
+		return domain.Apiary{}, domain.Conflict("蜂场 %q 已存在", apiary.ID)
 	}
 	m.apiaries[apiary.ID] = apiary
-	return nil
+	return apiary, nil
+}
+
+// lookupApiaryLocked 按编号身份（大小写不敏感）查找蜂场，调用时需持有写锁。
+func (m *Memory) lookupApiaryLocked(id string) (domain.Apiary, bool) {
+	if apiary, ok := m.apiaries[id]; ok {
+		return apiary, true
+	}
+	key := domain.ApiaryRegistrationKey(id)
+	for existingID, apiary := range m.apiaries {
+		if domain.ApiaryRegistrationKey(existingID) == key {
+			return apiary, true
+		}
+	}
+	return domain.Apiary{}, false
 }
 
 func (m *Memory) GetApiary(id string) (domain.Apiary, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	apiary, ok := m.apiaries[id]
-	return apiary, ok
+	if apiary, ok := m.apiaries[id]; ok {
+		return apiary, true
+	}
+	key := domain.ApiaryRegistrationKey(id)
+	for existingID, apiary := range m.apiaries {
+		if domain.ApiaryRegistrationKey(existingID) == key {
+			return apiary, true
+		}
+	}
+	return domain.Apiary{}, false
 }
 
+// CreateHive 在同一把写锁内确认蜂场已经登记成功并判定蜂箱编号全局唯一。
+// 只有已确认的蜂场可以安装蜂箱，被拒绝或从未存在的编号不会留下任何可挂载痕迹。
 func (m *Memory) CreateHive(hive domain.Hive) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.apiaries[hive.ApiaryID]; !ok && !m.hasApiarySlotLocked(hive.ApiaryID) {
+	if _, ok := m.lookupApiaryLocked(hive.ApiaryID); !ok {
 		return domain.NotFound("蜂场", hive.ApiaryID)
 	}
 	if _, ok := m.hives[hive.ID]; ok {
@@ -68,73 +86,6 @@ func (m *Memory) CreateHive(hive domain.Hive) error {
 	}
 	m.hives[hive.ID] = hive
 	return nil
-}
-
-// ReserveApiarySlot 为一次蜂场登记预留唯一性键，已经存在时返回冲突。
-func (m *Memory) ReserveApiarySlot(key, apiaryID string) error {
-	m.mu.RLock()
-	_, exists := m.apiarySlots[key]
-	m.mu.RUnlock()
-	if exists {
-		return domain.Conflict("蜂场登记 %q 已存在", apiaryID)
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.apiarySlots[key] = apiarySlot{apiaryID: apiaryID}
-	return nil
-}
-
-// CommitApiaryRegistration 把预留的登记槽位确认为蜂场记录。
-func (m *Memory) CommitApiaryRegistration(key string, apiary domain.Apiary) (domain.Apiary, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	slot, ok := m.apiarySlots[key]
-	if !ok {
-		return domain.Apiary{}, domain.Storage("蜂场登记 %q 缺少预留槽位", apiary.ID)
-	}
-	slot.apiaryID = apiary.ID
-	slot.confirmed = true
-	m.apiarySlots[key] = slot
-	m.apiaries[apiary.ID] = apiary
-	return apiary, nil
-}
-
-// RefreshApiaryRegistration 用重复提交的内容刷新已经确认的蜂场记录。
-func (m *Memory) RefreshApiaryRegistration(key string, apiary domain.Apiary) (domain.Apiary, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	existing, ok := m.apiaries[apiary.ID]
-	if !ok {
-		return domain.Apiary{}, domain.Storage("蜂场登记 %q 尚未确认", apiary.ID)
-	}
-	existing.Name = apiary.Name
-	existing.District = apiary.District
-	existing.Keeper = apiary.Keeper
-	m.apiaries[apiary.ID] = existing
-	slot := m.apiarySlots[key]
-	slot.apiaryID = existing.ID
-	slot.confirmed = true
-	m.apiarySlots[key] = slot
-	return existing, nil
-}
-
-// ApiaryRegistered 判断某个编号是否已经有登记，包括尚未确认的预留。
-func (m *Memory) ApiaryRegistered(apiaryID string) bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if _, ok := m.apiaries[apiaryID]; ok {
-		return true
-	}
-	return m.hasApiarySlotLocked(apiaryID)
-}
-
-func (m *Memory) hasApiarySlotLocked(apiaryID string) bool {
-	for _, slot := range m.apiarySlots {
-		if domain.SameApiaryIdentity(slot.apiaryID, apiaryID) {
-			return true
-		}
-	}
-	return false
 }
 
 func (m *Memory) GetHive(id string) (domain.Hive, bool) {
